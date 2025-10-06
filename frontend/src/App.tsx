@@ -45,6 +45,8 @@ function App() {
   }, []);
 
   async function connectToLiveKit(newRoom: any, url: string, token: string) {
+    setSessionStarted(true);
+
     // Set up event listeners before connecting
     newRoom.on(RoomEvent.TrackSubscribed, (track: any, publication: any, participant: any) => {
       console.log("Track subscribed:", track.kind, track.sid);
@@ -238,10 +240,10 @@ function App() {
 
   async function startSession() {
     try {
-      if (!isWebRTCConnected) {
-        setStatus("Please create OpenAI session first");
-        return;
-      }
+      // if (!isWebRTCConnected) {
+      //   setStatus("Please create OpenAI session first");
+      //   return;
+      // }
 
       setStatus("Setting up HeyGen session...");
 
@@ -432,7 +434,7 @@ function App() {
                 </button>
                 <button
                   onClick={startSession}
-                  disabled={!isWebRTCConnected}
+                  // disabled={!isWebRTCConnected}
                   className="px-4 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-all transform hover:scale-105 font-medium disabled:bg-gray-300 disabled:cursor-not-allowed disabled:transform-none"
                 >
                   2. Add Avatar
