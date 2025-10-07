@@ -2,6 +2,16 @@
 import React, { useRef, useState } from "react";
 import axios from "axios";
 import { Room, RoomEvent } from "livekit-client";
+import EventDisplay from "./components/EventDisplay";
+
+export type OpenAIEvent = {
+  id: string;
+  timestamp: Date;
+  type: string;
+  content?: string;
+  text?: string;
+  direction: 'sent' | 'received';
+};
 
 function App() {
   const [session, setSession] = useState<any>(null);
@@ -16,6 +26,7 @@ function App() {
   const [avatars, setAvatars] = useState<any[]>([]);
   const [selectedAvatar, setSelectedAvatar] = useState<string>("");
   const [isWebRTCConnected, setIsWebRTCConnected] = useState(false);
+  const [openaiEvents, setOpenAIEvents] = useState<OpenAIEvent[]>([]);
   const peerConnectionRef = useRef<RTCPeerConnection | null>(null);
   const dataChannelRef = useRef<RTCDataChannel | null>(null);
 
@@ -36,6 +47,18 @@ function App() {
     }
     fetchAvatars();
   }, []);
+
+  // Helper function to add events to the display
+  const addOpenAIEvent = (type: string, content?: string, direction: 'sent' | 'received' = 'received') => {
+    const newEvent: OpenAIEvent = {
+      id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      timestamp: new Date(),
+      type,
+      content,
+      direction
+    };
+    setOpenAIEvents(prev => [...prev, newEvent]);
+  };
 
   // Cleanup WebRTC on unmount
   React.useEffect(() => {
@@ -131,9 +154,11 @@ function App() {
           const data = JSON.parse(event.data);
           console.log("Received data channel message:", data);
 
+          // Capture all events from OpenAI
+          addOpenAIEvent(data.type, data.text || data.content || JSON.stringify(data), 'received');
+
           // Handle different types of responses from OpenAI
           if (data.type === 'response.text') {
-            // You can handle text responses here if needed
             console.log("OpenAI text response:", data.text);
           }
 
@@ -153,6 +178,7 @@ function App() {
           }
         } catch (error) {
           console.error("Error parsing data channel message:", error);
+          addOpenAIEvent('error', `Failed to parse message: ${error.message}`, 'received');
         }
       };
 
@@ -194,9 +220,12 @@ function App() {
 
   function sendDataToOpenAI(event: any) {
     if (dataChannelRef.current && dataChannelRef.current.readyState === 'open') {
+      // Capture sent events
+      addOpenAIEvent(event.type, event.content || event.text, 'sent');
       dataChannelRef.current.send(JSON.stringify(event));
     } else {
       console.error("Data channel not available");
+      addOpenAIEvent('error', 'Data channel not available - cannot send message', 'sent');
     }
   }
 
@@ -368,6 +397,10 @@ function App() {
     }
   }
 
+  function clearEvents() {
+    setOpenAIEvents([]);
+  }
+
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100">
       <div className="container mx-auto px-4 py-8 max-w-6xl">
@@ -520,7 +553,7 @@ function App() {
             </div>
           </div>
 
-          {/* Right Column - Video & Status */}
+          {/* Right Column - Video, Status & Events */}
           <div className="space-y-6">
             {/* Video Card */}
             <div className="bg-white rounded-xl shadow-lg p-6">
@@ -548,6 +581,9 @@ function App() {
                 )}
               </div>
             </div>
+
+            {/* OpenAI Events Display */}
+            <EventDisplay events={openaiEvents} maxEvents={20} onClearEvents={clearEvents} />
 
             {/* Status Card */}
             <div className="bg-white rounded-xl shadow-lg p-6">
