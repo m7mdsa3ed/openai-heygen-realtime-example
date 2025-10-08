@@ -51,7 +51,7 @@ function App() {
   // Helper function to add events to the display
   const addOpenAIEvent = (type: string, content?: string, direction: 'sent' | 'received' = 'received') => {
     const newEvent: OpenAIEvent = {
-      id: `${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
+      id: `${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
       timestamp: new Date(),
       type,
       content,
@@ -71,7 +71,7 @@ function App() {
     setSessionStarted(true);
 
     // Set up event listeners before connecting
-    newRoom.on(RoomEvent.TrackSubscribed, (track: any, publication: any, participant: any) => {
+    newRoom.on(RoomEvent.TrackSubscribed, (track: any) => {
       console.log("Track subscribed:", track.kind, track.sid);
 
       if (track.kind === "video") {
@@ -89,7 +89,7 @@ function App() {
       }
     });
 
-    newRoom.on(RoomEvent.ParticipantConnected, (participant) => {
+    newRoom.on(RoomEvent.ParticipantConnected, (participant: any) => {
       console.log("Participant connected:", participant.identity);
     });
 
@@ -129,7 +129,7 @@ function App() {
       audioRef.current.autoplay = true;
       pc.ontrack = (e) => {
         console.log("Received remote track:", e.track.kind);
-        if (e.streams[0]) {
+        if (e.streams[0] && audioRef.current) {
           audioRef.current.srcObject = e.streams[0];
         }
       };
@@ -162,23 +162,24 @@ function App() {
             console.log("OpenAI text response:", data.text);
           }
 
-          // Forward events to HeyGen if we have a session
-          if (webrtcSession?.sessionId && data.type === 'response.text') {
+          // Forward ALL events to HeyGen if we have a session
+          if (webrtcSession?.sessionId) {
             try {
+              console.log('📤 Forwarding event to backend:', data.type);
               await axios.post("http://localhost:5000/api/realtime/events", {
                 sessionId: webrtcSession.sessionId,
-                event: {
-                  type: "input_text",
-                  content: data.text
-                }
+                event: data
               });
+              console.log('✅ Event forwarded successfully');
             } catch (error) {
-              console.error("Error forwarding to HeyGen:", error);
+              console.error("❌ Error forwarding to HeyGen:", error);
             }
+          } else {
+            console.log('⚠️ No session available for forwarding');
           }
         } catch (error) {
           console.error("Error parsing data channel message:", error);
-          addOpenAIEvent('error', `Failed to parse message: ${error.message}`, 'received');
+          addOpenAIEvent('error', `Failed to parse message: ${error instanceof Error ? error.message : 'Unknown error'}`, 'received');
         }
       };
 
@@ -204,7 +205,7 @@ function App() {
       }
 
       const answer = {
-        type: "answer",
+        type: "answer" as const,
         sdp: await sdpResponse.text(),
       };
       await pc.setRemoteDescription(answer);
@@ -252,31 +253,14 @@ function App() {
     setWebrtcSession(null);
   }
 
-  async function createSession() {
-    try {
-      setStatus("Creating WebRTC connection to OpenAI...");
-
-      // Setup direct WebRTC connection to OpenAI
-      await setupWebRTCConnection();
-
-      setSessionStarted(false);
-      setStatus("OpenAI WebRTC session created");
-    } catch (error) {
-      console.error("Failed to create session:", error);
-      setStatus("failed to create session");
-    }
-  }
-
   async function startSession() {
     try {
-      // if (!isWebRTCConnected) {
-      //   setStatus("Please create OpenAI session first");
-      //   return;
-      // }
+      setStatus("Creating combined OpenAI + HeyGen session...");
 
-      setStatus("Setting up HeyGen session...");
+      // Setup direct WebRTC connection to OpenAI first
+      await setupWebRTCConnection();
 
-      // Create HeyGen session for avatar
+      // Create HeyGen session for avatar and integrate with OpenAI
       const resp = await axios.post("http://localhost:5000/api/session/create", {
         character: selectedAvatar,
         voice: "en_us_male_2"
@@ -309,7 +293,7 @@ function App() {
   }
 
   async function ask() {
-    if (!isWebRTCConnected) return alert("Create OpenAI session first");
+    if (!isWebRTCConnected) return alert("Start session first");
     if (!prompt.trim()) return alert("Please enter a message");
 
     try {
@@ -457,20 +441,14 @@ function App() {
 
             {/* Session Controls Card */}
             <div className="bg-white rounded-xl shadow-lg p-6">
-              <h2 className="text-xl font-semibold mb-4 text-gray-800">2. Start Token-Based Session</h2>
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                <button
-                  onClick={createSession}
-                  className="px-4 py-3 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-all transform hover:scale-105 font-medium disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
-                >
-                  1. Connect OpenAI
-                </button>
+              <h2 className="text-xl font-semibold mb-4 text-gray-800">2. Start Combined Session</h2>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <button
                   onClick={startSession}
-                  // disabled={!isWebRTCConnected}
-                  className="px-4 py-3 bg-green-500 text-white rounded-lg hover:bg-green-600 transition-all transform hover:scale-105 font-medium disabled:bg-gray-300 disabled:cursor-not-allowed disabled:transform-none"
+                  disabled={!selectedAvatar}
+                  className="px-4 py-3 bg-gradient-to-r from-blue-500 to-green-500 text-white rounded-lg hover:from-blue-600 hover:to-green-600 transition-all transform hover:scale-105 font-medium disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none"
                 >
-                  2. Add Avatar
+                  Start Session
                 </button>
                 <button
                   onClick={closeSession}
@@ -480,6 +458,13 @@ function App() {
                   End Session
                 </button>
               </div>
+              {!selectedAvatar && (
+                <div className="mt-3 p-3 bg-yellow-50 border border-yellow-200 rounded-lg">
+                  <p className="text-sm text-yellow-700">
+                    ⚠️ Please select an avatar above before starting
+                  </p>
+                </div>
+              )}
               {isWebRTCConnected && (
                 <div className="mt-3 p-3 bg-blue-50 border border-blue-200 rounded-lg">
                   <div className="flex items-center">

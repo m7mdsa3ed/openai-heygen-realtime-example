@@ -34,10 +34,6 @@ export async function createHeygenSession(opts: CreateSessionRequest & { charact
     },
   });
 
-  console.log({
-    resp
-  });
-
   // Return the full HeyGen response which includes code, data, and message
   return resp.data;
 }

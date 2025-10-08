@@ -5,6 +5,8 @@ import bodyParser from "body-parser";
 import cors from "cors";
 import { createHeygenSession, startHeygenSession, closeHeygenSession, sendHeygenTask, startHeygenAudioPipe, stopHeygenAudioPipe, getAvailableAvatars } from "./heygen";
 import { generateOpenAIRealtimeToken } from "./openai_realtime";
+import { HeyGenWebSocketClient } from "./heygen_websocket";
+import { OpenAIHeyGenBridge } from "./openai_heygen_bridge";
 import { CreateSessionRequest, SessionResponse } from "./types";
 const app = express();
 app.use(cors());
@@ -15,6 +17,8 @@ const activeSessions = new Map<string, {
   heygenSessionId?: string;
   heygenData?: any;
   createdAt: Date;
+  heygenWsClient?: HeyGenWebSocketClient;
+  openaiHeyGenBridge?: OpenAIHeyGenBridge;
 }>();
 
 /**
@@ -71,6 +75,8 @@ app.post("/api/session/create", async (req, res) => {
     const sessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
     let heygenSession = null;
+    let heygenWsClient: HeyGenWebSocketClient | undefined;
+    let openaiHeyGenBridge: OpenAIHeyGenBridge | undefined;
 
     if (character) {
       const heygenResponse = await createHeygenSession({
@@ -82,11 +88,40 @@ app.post("/api/session/create", async (req, res) => {
       // Start HeyGen session
       await startHeygenSession(heygenSession.session_id);
 
+      // Create HeyGen WebSocket client if realtime_endpoint is available
+      if (heygenSession.realtime_endpoint) {
+        const apiKey = process.env.HEYGEN_API_KEY;
+        if (!apiKey) throw new Error("HEYGEN_API_KEY is not set");
+
+        heygenWsClient = new HeyGenWebSocketClient(
+          heygenSession.session_id,
+          heygenSession.realtime_endpoint,
+          apiKey
+        );
+
+        // Create bridge to handle OpenAI -> HeyGen event mapping
+        openaiHeyGenBridge = new OpenAIHeyGenBridge(heygenWsClient);
+
+        // Connect to HeyGen WebSocket
+        try {
+          await heygenWsClient.connect();
+          console.log(`✅ HeyGen WebSocket connected for session ${sessionId}`);
+          console.log(`🔗 WebSocket URL: ${heygenSession.realtime_endpoint}`);
+        } catch (wsError) {
+          console.error("❌ Failed to connect HeyGen WebSocket:", wsError);
+          console.log("⚠️ Continuing without WebSocket - avatar will still work via LiveKit");
+          heygenWsClient = undefined;
+          openaiHeyGenBridge = undefined;
+        }
+      }
+
       // Store session mapping
       activeSessions.set(sessionId, {
         heygenSessionId: heygenSession.session_id,
         heygenData: heygenSession,
-        createdAt: new Date()
+        createdAt: new Date(),
+        heygenWsClient,
+        openaiHeyGenBridge
       });
     } else {
       // Store session without HeyGen
@@ -144,7 +179,19 @@ app.post("/api/realtime/events", async (req, res) => {
       return res.status(404).json({ error: "Session not found" });
     }
 
-    // Forward relevant events to HeyGen if we have a HeyGen session
+    // Forward events to OpenAI->HeyGen bridge if available
+    if (sessionData.openaiHeyGenBridge) {
+      try {
+        console.log('🌉 Forwarding event to bridge:', event.type);
+        await sessionData.openaiHeyGenBridge.processOpenAIEvent(event);
+      } catch (bridgeError) {
+        console.error("❌ Bridge processing error:", bridgeError);
+      }
+    } else {
+      console.log('⚠️ No bridge available for session, using legacy forwarding');
+    }
+
+    // Legacy forwarding for text events
     if (sessionData.heygenSessionId && (event.type === 'input_text' || event.type === 'user_speech')) {
       const text = event.content || event.text || '';
       if (text.trim()) {
@@ -169,6 +216,15 @@ app.delete("/session/:sessionId", async (req, res) => {
 
     if (!sessionData) {
       return res.status(404).json({ error: "Session not found" });
+    }
+
+    // Clean up HeyGen WebSocket and bridge if they exist
+    if (sessionData.openaiHeyGenBridge) {
+      sessionData.openaiHeyGenBridge.destroy();
+    }
+
+    if (sessionData.heygenWsClient) {
+      sessionData.heygenWsClient.disconnect();
     }
 
     // Close HeyGen session if it exists
@@ -243,10 +299,95 @@ app.post("/api/heygen/stop", async (req, res) => {
   try {
     const { sessionId } = req.body;
     if (!sessionId) return res.status(400).json({ error: "sessionId required" });
+
+    // Find the session and clean up bridge/WebSocket
+    const sessionData = activeSessions.get(sessionId);
+    if (sessionData?.openaiHeyGenBridge) {
+      sessionData.openaiHeyGenBridge.destroy();
+      sessionData.openaiHeyGenBridge = undefined;
+    }
+    if (sessionData?.heygenWsClient) {
+      sessionData.heygenWsClient.disconnect();
+      sessionData.heygenWsClient = undefined;
+    }
+
     await stopHeygenAudioPipe(sessionId);
     res.json({ success: true });
   } catch (err: any) {
     console.error("heygen/stop err:", err.message || err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Get HeyGen WebSocket bridge state
+ */
+app.get("/api/heygen/state/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const sessionData = activeSessions.get(sessionId);
+
+    if (!sessionData) {
+      return res.status(404).json({ error: "Session not found" });
+    }
+
+    if (sessionData.openaiHeyGenBridge) {
+      const state = sessionData.openaiHeyGenBridge.getState();
+      res.json({
+        hasWebSocket: true,
+        ...state
+      });
+    } else {
+      res.json({
+        hasWebSocket: false,
+        isConnected: false,
+        isSpeaking: false,
+        isListening: false,
+        currentSpeakEventId: null
+      });
+    }
+  } catch (err: any) {
+    console.error("heygen/state err:", err.message || err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+/**
+ * Control HeyGen avatar directly via WebSocket
+ */
+app.post("/api/heygen/control/:sessionId", async (req, res) => {
+  try {
+    const { sessionId } = req.params;
+    const { action, text } = req.body;
+
+    const sessionData = activeSessions.get(sessionId);
+    if (!sessionData?.openaiHeyGenBridge) {
+      return res.status(404).json({ error: "HeyGen WebSocket bridge not available for this session" });
+    }
+
+    const bridge = sessionData.openaiHeyGenBridge;
+
+    switch (action) {
+      case 'speak':
+        if (!text) return res.status(400).json({ error: "text required for speak action" });
+        await bridge.speakText(text);
+        break;
+      case 'interrupt':
+        bridge.interrupt();
+        break;
+      case 'start_listening':
+        bridge.startListening();
+        break;
+      case 'stop_listening':
+        bridge.stopListening();
+        break;
+      default:
+        return res.status(400).json({ error: "Invalid action. Use: speak, interrupt, start_listening, stop_listening" });
+    }
+
+    res.json({ success: true, state: bridge.getState() });
+  } catch (err: any) {
+    console.error("heygen/control err:", err.message || err);
     res.status(500).json({ error: err.message });
   }
 });
